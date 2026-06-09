@@ -17,12 +17,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use schema_doc::{
-    detect_tag, generate_value, instance_type, is_multi_variant, non_null_variants, ref_name,
-    root_title, string_format_name,
+    Defs, detect_tag, display_value, generate_value, instance_type, is_multi_variant, item_schema,
+    non_null_variants, order_properties, ref_name, root_title, scalar_type_name, transparent_inner,
 };
-use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec};
+use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Stderr};
 use std::path::Path;
@@ -246,7 +245,7 @@ fn build_root(schema: &RootSchema) -> Node {
 
 const MAX_POPULATE_DEPTH: usize = 64;
 
-fn populate(node: &mut Node, defs: &BTreeMap<String, Schema>, depth: usize) {
+fn populate(node: &mut Node, defs: &Defs, depth: usize) {
     if node.populated || depth > MAX_POPULATE_DEPTH {
         node.populated = true;
         return;
@@ -297,9 +296,9 @@ fn populate(node: &mut Node, defs: &BTreeMap<String, Schema>, depth: usize) {
 
     // array → one representative element child the user drills into. The
     // element is always "in" (`is_required`), so it populates eagerly.
-    if let Some(item) = array_item_schema(&o) {
+    if let Some(item) = item_schema(&o) {
         node.children
-            .push(child_node("[item]".to_string(), &item, true, defs, depth));
+            .push(child_node("[item]".to_string(), item, true, defs, depth));
         node.populated = true;
         return;
     }
@@ -310,25 +309,15 @@ fn populate(node: &mut Node, defs: &BTreeMap<String, Schema>, depth: usize) {
 fn populate_from_object(
     node: &mut Node,
     o: &SchemaObject,
-    defs: &BTreeMap<String, Schema>,
+    defs: &Defs,
     depth: usize,
 ) {
     let Some(ov) = &o.object else {
         node.populated = true;
         return;
     };
-    let mut required: Vec<(&String, &Schema)> = Vec::new();
-    let mut optional: Vec<(&String, &Schema)> = Vec::new();
-    for (k, v) in &ov.properties {
-        if ov.required.contains(k) {
-            required.push((k, v));
-        } else {
-            optional.push((k, v));
-        }
-    }
-    for (k, v) in required.iter().chain(optional.iter()) {
-        let is_required = ov.required.contains(*k);
-        node.children.push(child_node((*k).clone(), v, is_required, defs, depth));
+    for (k, v, is_required) in order_properties(ov, &[]) {
+        node.children.push(child_node(k.clone(), v, is_required, defs, depth));
     }
     node.populated = true;
 }
@@ -343,7 +332,7 @@ fn child_node(
     label: String,
     schema: &Schema,
     is_required: bool,
-    defs: &BTreeMap<String, Schema>,
+    defs: &Defs,
     depth: usize,
 ) -> Node {
     let o = match schema {
@@ -378,7 +367,7 @@ fn child_node(
 /// `progenitor_client::generate_value` (same logic that backs
 /// `--json-body-template`'s non-interactive output), so arrays, enums, and
 /// scalars all resolve identically without a parallel implementation here.
-fn classify(o: &SchemaObject, defs: &BTreeMap<String, Schema>) -> (NodeKind, bool, Option<Value>) {
+fn classify(o: &SchemaObject, defs: &Defs) -> (NodeKind, bool, Option<Value>) {
     let leaf = |o: &SchemaObject| {
         (
             NodeKind::Leaf,
@@ -400,8 +389,8 @@ fn classify(o: &SchemaObject, defs: &BTreeMap<String, Schema>) -> (NodeKind, boo
     }
     // array of complex elements (object / multi-variant oneOf) → drillable; the
     // user customizes a representative element. Arrays of scalars stay leaves.
-    if let Some(item) = array_item_schema(&resolved) {
-        if let Some(item_resolved) = resolve_to_object(&item, defs) {
+    if let Some(item) = item_schema(&resolved) {
+        if let Some(item_resolved) = resolve_to_object(item, defs) {
             if item_resolved.object.is_some() || is_multi_variant(&item_resolved) {
                 return (NodeKind::Array, true, None);
             }
@@ -409,30 +398,6 @@ fn classify(o: &SchemaObject, defs: &BTreeMap<String, Schema>) -> (NodeKind, boo
     }
     // everything else (enum, scalar, scalar array) is a leaf with a generated value.
     leaf(o)
-}
-
-/// If `o` is a "transparent wrapper" — a single-element `allOf`, or a union
-/// with exactly one non-null arm (schemars' `Option<T>`) — return the inner
-/// schema it stands for, so callers can see through to the real type.
-fn transparent_inner(o: &SchemaObject) -> Option<&Schema> {
-    let sub = o.subschemas.as_ref()?;
-    if let Some(all) = &sub.all_of {
-        if all.len() == 1 {
-            return Some(&all[0]);
-        }
-    }
-    match non_null_variants(o)?.as_slice() {
-        [single] => Some(single),
-        _ => None,
-    }
-}
-
-/// If `o` is an array schema, return its element (item) schema.
-fn array_item_schema(o: &SchemaObject) -> Option<Schema> {
-    match o.array.as_ref()?.items.as_ref()? {
-        SingleOrVec::Single(s) => Some((**s).clone()),
-        SingleOrVec::Vec(v) => v.first().cloned(),
-    }
 }
 
 fn default_value(o: &SchemaObject) -> Option<Value> {
@@ -446,7 +411,7 @@ fn default_value(o: &SchemaObject) -> Option<Value> {
     Some(d)
 }
 
-fn resolve_to_object(schema: &Schema, defs: &BTreeMap<String, Schema>) -> Option<SchemaObject> {
+fn resolve_to_object(schema: &Schema, defs: &Defs) -> Option<SchemaObject> {
     let Schema::Object(mut o) = schema.clone() else {
         return None;
     };
@@ -470,15 +435,6 @@ fn resolve_to_object(schema: &Schema, defs: &BTreeMap<String, Schema>) -> Option
     Some(o)
 }
 
-/// Render a JSON value for display: strings get quotes, everything else uses
-/// its plain JSON form. Used for enum samples and `(default: …)` hints.
-fn display_value(v: &Value) -> String {
-    match v {
-        Value::String(s) => format!("\"{}\"", s),
-        other => other.to_string(),
-    }
-}
-
 fn describe_type(o: &SchemaObject) -> String {
     if let Some(r) = &o.reference {
         return format!("<{}>", ref_name(r));
@@ -498,29 +454,21 @@ fn describe_type(o: &SchemaObject) -> String {
             return items.join(" | ");
         }
     }
-    if let Some(av) = &o.array {
-        let item = match &av.items {
-            Some(SingleOrVec::Single(s)) => match s.as_ref() {
-                Schema::Object(io) => describe_type(io),
-                _ => "any".to_string(),
-            },
+    if o.array.is_some() {
+        let item = match item_schema(o) {
+            Some(Schema::Object(io)) => describe_type(io),
             _ => "any".to_string(),
         };
         return format!("[{}, ...]", item);
     }
-    match instance_type(&o.instance_type) {
-        Some(InstanceType::String) => string_format_name(o.format.as_deref()),
-        Some(InstanceType::Integer) => o.format.clone().unwrap_or_else(|| "Integer".to_string()),
-        Some(InstanceType::Number) => "Number".to_string(),
-        Some(InstanceType::Boolean) => "bool".to_string(),
-        Some(InstanceType::Null) => "null".to_string(),
+    scalar_type_name(o).unwrap_or_else(|| match instance_type(&o.instance_type) {
         Some(InstanceType::Array) => "[...]".to_string(),
         Some(InstanceType::Object) => "object".to_string(),
-        None => "any".to_string(),
-    }
+        _ => "any".to_string(),
+    })
 }
 
-fn variant_label(schema: &Schema, defs: &BTreeMap<String, Schema>) -> String {
+fn variant_label(schema: &Schema, defs: &Defs) -> String {
     if let Schema::Object(o) = schema {
         // Tagged-object variant: {type: "object", properties: {type: {enum: ["local"]}, …}}.
         if let Some(ov) = &o.object {
@@ -641,7 +589,7 @@ fn node_at_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
 
 struct App {
     root: Node,
-    defs: BTreeMap<String, Schema>,
+    defs: Defs,
     rows: Vec<Row>,
     state: ListState,
     title: String,

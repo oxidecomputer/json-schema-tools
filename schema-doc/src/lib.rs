@@ -39,10 +39,8 @@ fn generate_value_object(
     definitions: &Defs,
 ) -> serde_json::Value {
     if let Some(reference) = &schema.reference {
-        if let Some(def_name) = reference.strip_prefix("#/definitions/") {
-            if let Some(def_schema) = definitions.get(def_name) {
-                return generate_value(def_schema, definitions);
-            }
+        if let Some(def_schema) = definitions.get(&ref_name(reference)) {
+            return generate_value(def_schema, definitions);
         }
         return serde_json::Value::Null;
     }
@@ -86,18 +84,16 @@ fn generate_value_object(
                 serde_json::Value::Number(serde_json::Number::from(0))
             }
             InstanceType::String => serde_json::Value::String(String::new()),
-            InstanceType::Array => match &schema.array {
-                Some(items) => match &items.items {
-                    Some(SingleOrVec::Single(item_schema)) => {
-                        serde_json::Value::Array(vec![generate_value(item_schema, definitions)])
+            InstanceType::Array => {
+                let items = schema.array.as_ref().and_then(|a| a.items.as_ref());
+                serde_json::Value::Array(match items {
+                    Some(SingleOrVec::Single(s)) => vec![generate_value(s, definitions)],
+                    Some(SingleOrVec::Vec(v)) => {
+                        v.iter().map(|s| generate_value(s, definitions)).collect()
                     }
-                    Some(SingleOrVec::Vec(item_schemas)) => serde_json::Value::Array(
-                        item_schemas.iter().map(|s| generate_value(s, definitions)).collect(),
-                    ),
-                    None => serde_json::Value::Array(vec![]),
-                },
-                None => serde_json::Value::Array(vec![]),
-            },
+                    None => vec![],
+                })
+            }
             InstanceType::Object => {
                 let mut map = serde_json::Map::new();
                 if let Some(object) = &schema.object {
@@ -383,7 +379,10 @@ fn default_suffix(v: &Schema, sep: &str, style: &Style) -> String {
     }
 }
 
-fn order_properties<'a>(
+/// An object's properties in display order — `priority` fields first, then
+/// required, then optional (each alphabetical via `BTreeMap` iteration) —
+/// with each property's required-ness.
+pub fn order_properties<'a>(
     ov: &'a schemars::schema::ObjectValidation,
     priority: &[String],
 ) -> Vec<(&'a String, &'a Schema, bool)> {
@@ -632,28 +631,19 @@ fn render_schema_object(
         return style.cyan(&format!("<{}>", name));
     }
 
-    // allOf wrapping a single ref is just a description carrier; unwrap.
-    if let Some(sub) = &o.subschemas {
-        if let Some(all) = &sub.all_of {
-            if all.len() == 1 {
-                return render_schema(&all[0], defs, refs, depth, style);
-            }
-        }
+    // A transparent wrapper (single-element `allOf`, or a union with one real
+    // arm — schemars' `Option<T>`) renders as its inner schema.
+    if let Some(inner) = transparent_inner(o) {
+        return render_schema(inner, defs, refs, depth, style);
     }
 
     // oneOf/anyOf: drop null alternatives (optionality is shown by brackets).
-    if let Some(sub) = &o.subschemas {
-        if let Some(variants) = sub.one_of.as_ref().or(sub.any_of.as_ref()) {
-            let non_null: Vec<&Schema> = variants.iter().filter(|v| !is_null_schema(v)).collect();
-            if non_null.len() == 1 {
-                return render_schema(non_null[0], defs, refs, depth, style);
-            }
-            let rendered: Vec<String> = non_null
-                .iter()
-                .map(|v| render_schema(v, defs, refs, depth, style))
-                .collect();
-            return join_variants(&rendered, depth, style);
-        }
+    if let Some(non_null) = non_null_variants(o) {
+        let rendered: Vec<String> = non_null
+            .iter()
+            .map(|v| render_schema(v, defs, refs, depth, style))
+            .collect();
+        return join_variants(&rendered, depth, style);
     }
 
     if let Some(values) = &o.enum_values {
@@ -670,14 +660,12 @@ fn render_schema_object(
         }
     }
 
+    if let Some(name) = scalar_type_name(o) {
+        return name;
+    }
     match instance_type(&o.instance_type) {
-        Some(InstanceType::String) => render_string(o),
-        Some(InstanceType::Integer) => render_integer(o),
-        Some(InstanceType::Number) => "Number".to_string(),
-        Some(InstanceType::Boolean) => "bool".to_string(),
-        Some(InstanceType::Null) => "null".to_string(),
         Some(InstanceType::Array) => render_array(o, defs, refs, depth, style),
-        Some(InstanceType::Object) | None => render_object(o, &[], defs, refs, depth, style),
+        _ => render_object(o, &[], defs, refs, depth, style),
     }
 }
 
@@ -702,6 +690,51 @@ pub fn non_null_variants(o: &SchemaObject) -> Option<Vec<&Schema>> {
 /// True when `o` is a union with more than one real arm.
 pub fn is_multi_variant(o: &SchemaObject) -> bool {
     non_null_variants(o).is_some_and(|v| v.len() > 1)
+}
+
+/// If `o` is a "transparent wrapper" — a single-element `allOf`, or a union
+/// with exactly one non-null arm (schemars' `Option<T>`) — return the inner
+/// schema it stands for, so callers can see through to the real type.
+pub fn transparent_inner(o: &SchemaObject) -> Option<&Schema> {
+    if let Some([single]) = o.subschemas.as_ref()?.all_of.as_deref() {
+        return Some(single);
+    }
+    match non_null_variants(o)?.as_slice() {
+        [single] => Some(single),
+        _ => None,
+    }
+}
+
+/// The representative element schema of an array: its single `items` schema,
+/// or the first entry of a tuple-style `items` list.
+pub fn item_schema(o: &SchemaObject) -> Option<&Schema> {
+    match o.array.as_ref()?.items.as_ref()? {
+        SingleOrVec::Single(s) => Some(s),
+        SingleOrVec::Vec(v) => v.first(),
+    }
+}
+
+/// Display name for a scalar instance type, shared by the grammar reference
+/// and the interactive builder. `None` for arrays, objects, and untyped
+/// schemas.
+pub fn scalar_type_name(o: &SchemaObject) -> Option<String> {
+    match instance_type(&o.instance_type)? {
+        InstanceType::String => Some(string_format_name(o.format.as_deref())),
+        InstanceType::Integer => Some(o.format.clone().unwrap_or_else(|| "Integer".to_string())),
+        InstanceType::Number => Some("Number".to_string()),
+        InstanceType::Boolean => Some("bool".to_string()),
+        InstanceType::Null => Some("null".to_string()),
+        InstanceType::Array | InstanceType::Object => None,
+    }
+}
+
+/// Render a JSON value for display: strings get quotes, everything else its
+/// plain JSON form. Used for enum samples and `(default: …)` hints.
+pub fn display_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("\"{}\"", s),
+        other => other.to_string(),
+    }
 }
 
 /// The display name for a root schema: its `title` in `snake_case`, falling
@@ -733,14 +766,6 @@ pub fn string_format_name(format: Option<&str>) -> String {
     }
 }
 
-fn render_string(o: &SchemaObject) -> String {
-    string_format_name(o.format.as_deref())
-}
-
-fn render_integer(o: &SchemaObject) -> String {
-    o.format.clone().unwrap_or_else(|| "Integer".to_string())
-}
-
 fn render_array(
     o: &SchemaObject,
     defs: &Defs,
@@ -748,14 +773,8 @@ fn render_array(
     depth: usize,
     style: &Style,
 ) -> String {
-    let item = match &o.array {
-        Some(av) => match &av.items {
-            Some(SingleOrVec::Single(s)) => render_schema(s, defs, refs, depth, style),
-            Some(SingleOrVec::Vec(v)) if !v.is_empty() => {
-                render_schema(&v[0], defs, refs, depth, style)
-            }
-            _ => "any".to_string(),
-        },
+    let item = match item_schema(o) {
+        Some(s) => render_schema(s, defs, refs, depth, style),
         None => "any".to_string(),
     };
     format!("[{}, ...]", item)
@@ -797,11 +816,7 @@ fn plain_len(s: &str) -> usize {
 }
 
 fn default_annotation(o: &SchemaObject) -> Option<String> {
-    let d = o.metadata.as_ref()?.default.as_ref()?;
-    Some(match d {
-        serde_json::Value::String(s) => format!("\"{}\"", s),
-        other => other.to_string(),
-    })
+    o.metadata.as_ref()?.default.as_ref().map(display_value)
 }
 
 /// Collapse a schema's instance type to a single non-null `InstanceType`,
