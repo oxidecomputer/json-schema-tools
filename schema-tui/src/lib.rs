@@ -96,13 +96,25 @@ impl io::Write for TtyOut {
     }
 }
 
-fn setup_terminal() -> Result<TerminalT> {
-    enable_raw_mode()?;
-    let mut out = std::fs::OpenOptions::new()
+fn tty_out() -> TtyOut {
+    std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/tty")
         .map(TtyOut::Tty)
-        .unwrap_or_else(|_| TtyOut::Err(io::stderr()));
+        .unwrap_or_else(|_| TtyOut::Err(io::stderr()))
+}
+
+fn setup_terminal() -> Result<TerminalT> {
+    enable_raw_mode()?;
+    // A panic unwinds past `restore_terminal`; restore from the hook so the
+    // user's shell isn't left raw on the alternate screen.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(tty_out(), LeaveAlternateScreen);
+        prev(info);
+    }));
+    let mut out = tty_out();
     execute!(out, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(out);
     Ok(Terminal::new(backend)?)
