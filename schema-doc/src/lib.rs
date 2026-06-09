@@ -12,6 +12,10 @@
 //!
 
 use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A schema definitions map (`definitions`), used to resolve `$ref`s.
+pub type Defs = BTreeMap<String, Schema>;
 
 /// Generate a placeholder JSON value for an arbitrary schema node, resolving
 /// `$ref`s against `definitions`.
@@ -22,7 +26,7 @@ use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrV
 ///
 pub fn generate_value(
     schema: &Schema,
-    definitions: &std::collections::BTreeMap<String, Schema>,
+    definitions: &Defs,
 ) -> serde_json::Value {
     match schema {
         Schema::Bool(_) => serde_json::Value::Null,
@@ -32,7 +36,7 @@ pub fn generate_value(
 
 fn generate_value_object(
     schema: &SchemaObject,
-    definitions: &std::collections::BTreeMap<String, Schema>,
+    definitions: &Defs,
 ) -> serde_json::Value {
     if let Some(reference) = &schema.reference {
         if let Some(def_name) = reference.strip_prefix("#/definitions/") {
@@ -119,8 +123,6 @@ fn generate_value_object(
 ///
 /// ANSI color is applied when stdout is a terminal and `NO_COLOR` is unset.
 pub fn render_body_schema(root_schema: &RootSchema) -> String {
-    use std::collections::BTreeSet;
-
     let colorize = should_colorize();
     let style = Style::new(colorize);
 
@@ -175,9 +177,9 @@ fn render_production(
     name: &str,
     schema: &Schema,
     is_root: bool,
-    usage_map: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    usage_map: &BTreeMap<String, BTreeSet<String>>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     style: &Style,
 ) -> String {
     // Effective schema (unwrap single-allOf metadata wrappers).
@@ -252,8 +254,8 @@ fn render_production(
 fn render_variants_production(
     variants: &[&Schema],
     tag: Option<&str>,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     style: &Style,
 ) -> String {
     // Try inline rendering first. If all variants fit, emit each on its own
@@ -302,8 +304,8 @@ fn render_variants_production(
 fn render_variant_inline(
     schema: &Schema,
     tag: Option<&str>,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     style: &Style,
     budget: usize,
 ) -> Option<String> {
@@ -311,27 +313,11 @@ fn render_variant_inline(
     if let Schema::Object(o) = schema {
         if let Some(ov) = &o.object {
             let priority: Vec<String> = tag.map(|t| vec![t.to_string()]).unwrap_or_default();
-            let ordered = order_properties(ov, &priority);
             let mut parts: Vec<String> = Vec::new();
-            for (k, v, is_required) in ordered {
-                let key_plain = if is_required {
-                    format!("{}:", k)
-                } else {
-                    format!("[{}]:", k)
-                };
-                let key_styled = if is_required {
-                    key_plain.clone()
-                } else {
-                    style.dim(&key_plain)
-                };
+            for (k, v, is_required) in order_properties(ov, &priority) {
+                let (_, key) = render_key(k, is_required, style);
                 let rendered = render_schema(v, defs, refs, 0, style);
-                let default_suffix = match v {
-                    Schema::Object(o) => default_annotation(o)
-                        .map(|d| style.dim(&format!(" (default: {})", d)))
-                        .unwrap_or_default(),
-                    _ => String::new(),
-                };
-                parts.push(format!("{} {}{}", key_styled, rendered, default_suffix));
+                parts.push(format!("{} {}{}", key, rendered, default_suffix(v, " ", style)));
             }
             let inline = if parts.is_empty() {
                 "{}".to_string()
@@ -357,17 +343,43 @@ fn render_variant_inline(
 fn render_schema_with_priority(
     schema: &Schema,
     priority: &[String],
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     depth: usize,
     style: &Style,
 ) -> String {
-    if priority.is_empty() {
-        return render_schema(schema, defs, refs, depth, style);
-    }
     match schema {
-        Schema::Object(o) => render_object_with_priority(o, priority, defs, refs, depth, style),
+        Schema::Object(o) if !priority.is_empty() => {
+            render_object(o, priority, defs, refs, depth, style)
+        }
         _ => render_schema(schema, defs, refs, depth, style),
+    }
+}
+
+/// `key:` for required, dimmed `[key]:` for optional — returned as
+/// (plain, styled) so callers can measure alignment on the plain form.
+fn render_key(k: &str, is_required: bool, style: &Style) -> (String, String) {
+    let plain = if is_required {
+        format!("{}:", k)
+    } else {
+        format!("[{}]:", k)
+    };
+    let styled = if is_required {
+        plain.clone()
+    } else {
+        style.dim(&plain)
+    };
+    (plain, styled)
+}
+
+/// The dimmed `(default: …)` annotation for a property, or empty. `sep` is
+/// the whitespace between the rendered type and the annotation.
+fn default_suffix(v: &Schema, sep: &str, style: &Style) -> String {
+    match v {
+        Schema::Object(o) => default_annotation(o)
+            .map(|d| style.dim(&format!("{}(default: {})", sep, d)))
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -384,7 +396,7 @@ fn order_properties<'a>(
             out.push((k, v, is_required(k)));
         }
     }
-    let used: std::collections::BTreeSet<&String> = out.iter().map(|t| t.0).collect();
+    let used: BTreeSet<&String> = out.iter().map(|t| t.0).collect();
 
     // Then the rest in one pass — required before optional, each alphabetical
     // via BTreeMap iteration: required go straight out, optional are collected
@@ -404,11 +416,11 @@ fn order_properties<'a>(
     out
 }
 
-fn render_object_with_priority(
+fn render_object(
     o: &SchemaObject,
     priority: &[String],
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     depth: usize,
     style: &Style,
 ) -> String {
@@ -423,6 +435,7 @@ fn render_object_with_priority(
     let indent_outer = "  ".repeat(depth);
     let indent_inner = "  ".repeat(depth + 1);
 
+    // Align all colons. Optional keys are 2 chars wider for the brackets.
     let key_width = ov
         .properties
         .keys()
@@ -436,31 +449,18 @@ fn render_object_with_priority(
         .max()
         .unwrap_or(0);
 
-    let ordered = order_properties(ov, priority);
     let mut lines = Vec::new();
-    for (k, v, is_required) in ordered {
-        let default = match v {
-            Schema::Object(o) => default_annotation(o),
-            _ => None,
-        };
+    for (k, v, is_required) in order_properties(ov, priority) {
         let rendered = render_schema(v, defs, refs, depth + 1, style);
-        let key_plain = if is_required {
-            format!("{}:", k)
-        } else {
-            format!("[{}]:", k)
-        };
-        let key_styled = if is_required {
-            key_plain.clone()
-        } else {
-            style.dim(&key_plain)
-        };
+        let (key_plain, key_styled) = render_key(k, is_required, style);
         let pad = " ".repeat((key_width + 1).saturating_sub(key_plain.len()));
-        let suffix = default
-            .map(|d| style.dim(&format!("   (default: {})", d)))
-            .unwrap_or_default();
         lines.push(format!(
             "{}{}{}  {}{}",
-            indent_inner, key_styled, pad, rendered, suffix
+            indent_inner,
+            key_styled,
+            pad,
+            rendered,
+            default_suffix(v, "   ", style)
         ));
     }
 
@@ -470,9 +470,9 @@ fn render_object_with_priority(
 fn build_usage_map(
     root: &RootSchema,
     top_name: &str,
-) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
-    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
-        std::collections::BTreeMap::new();
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut map: BTreeMap<String, BTreeSet<String>> =
+        BTreeMap::new();
     walk_for_refs(&Schema::Object(root.schema.clone()), top_name, &mut map);
     for (def_name, def_schema) in &root.definitions {
         walk_for_refs(def_schema, def_name, &mut map);
@@ -483,7 +483,7 @@ fn build_usage_map(
 fn walk_for_refs(
     schema: &Schema,
     parent: &str,
-    map: &mut std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    map: &mut BTreeMap<String, BTreeSet<String>>,
 ) {
     let Schema::Object(o) = schema else { return };
     if let Some(r) = &o.reference {
@@ -522,14 +522,14 @@ fn walk_for_refs(
 pub fn detect_tag(variants: &[&Schema]) -> Option<String> {
     // For each variant, collect fields that are single-value string enums.
     // The tag is a field present (with that shape) in every variant.
-    let candidate_sets: Vec<std::collections::BTreeSet<String>> = variants
+    let candidate_sets: Vec<BTreeSet<String>> = variants
         .iter()
         .map(|v| {
             let Schema::Object(o) = v else {
-                return std::collections::BTreeSet::new();
+                return BTreeSet::new();
             };
             let Some(ov) = &o.object else {
-                return std::collections::BTreeSet::new();
+                return BTreeSet::new();
             };
             ov.properties
                 .iter()
@@ -607,8 +607,8 @@ impl Style {
 
 fn render_schema(
     s: &Schema,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     depth: usize,
     style: &Style,
 ) -> String {
@@ -621,8 +621,8 @@ fn render_schema(
 
 fn render_schema_object(
     o: &SchemaObject,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     depth: usize,
     style: &Style,
 ) -> String {
@@ -677,7 +677,7 @@ fn render_schema_object(
         Some(InstanceType::Boolean) => "bool".to_string(),
         Some(InstanceType::Null) => "null".to_string(),
         Some(InstanceType::Array) => render_array(o, defs, refs, depth, style),
-        Some(InstanceType::Object) | None => render_object(o, defs, refs, depth, style),
+        Some(InstanceType::Object) | None => render_object(o, &[], defs, refs, depth, style),
     }
 }
 
@@ -743,8 +743,8 @@ fn render_integer(o: &SchemaObject) -> String {
 
 fn render_array(
     o: &SchemaObject,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
+    defs: &Defs,
+    refs: &mut BTreeSet<String>,
     depth: usize,
     style: &Style,
 ) -> String {
@@ -759,80 +759,6 @@ fn render_array(
         None => "any".to_string(),
     };
     format!("[{}, ...]", item)
-}
-
-fn render_object(
-    o: &SchemaObject,
-    defs: &std::collections::BTreeMap<String, Schema>,
-    refs: &mut std::collections::BTreeSet<String>,
-    depth: usize,
-    style: &Style,
-) -> String {
-    let ov = match &o.object {
-        Some(ov) => ov,
-        None => return "{}".to_string(),
-    };
-
-    if ov.properties.is_empty() {
-        return "{}".to_string();
-    }
-
-    let indent_outer = "  ".repeat(depth);
-    let indent_inner = "  ".repeat(depth + 1);
-
-    let mut required: Vec<(&String, &Schema)> = Vec::new();
-    let mut optional: Vec<(&String, &Schema)> = Vec::new();
-    for (k, v) in &ov.properties {
-        if ov.required.contains(k) {
-            required.push((k, v));
-        } else {
-            optional.push((k, v));
-        }
-    }
-
-    // Align all colons. Optional keys are 2 chars wider for the brackets.
-    let key_width = ov
-        .properties
-        .keys()
-        .map(|k| {
-            if ov.required.contains(k) {
-                k.len()
-            } else {
-                k.len() + 2
-            }
-        })
-        .max()
-        .unwrap_or(0);
-
-    let mut lines = Vec::new();
-    for (k, v) in required.iter().chain(optional.iter()) {
-        let is_required = ov.required.contains(*k);
-        let default = match v {
-            Schema::Object(o) => default_annotation(o),
-            _ => None,
-        };
-        let rendered = render_schema(v, defs, refs, depth + 1, style);
-        let key_plain = if is_required {
-            format!("{}:", k)
-        } else {
-            format!("[{}]:", k)
-        };
-        let key_styled = if is_required {
-            key_plain.clone()
-        } else {
-            style.dim(&key_plain)
-        };
-        let pad = " ".repeat((key_width + 1).saturating_sub(key_plain.len()));
-        let suffix = default
-            .map(|d| style.dim(&format!("   (default: {})", d)))
-            .unwrap_or_default();
-        lines.push(format!(
-            "{}{}{}  {}{}",
-            indent_inner, key_styled, pad, rendered, suffix
-        ));
-    }
-
-    format!("{{\n{}\n{}}}", lines.join("\n"), indent_outer)
 }
 
 fn join_variants(variants: &[String], depth: usize, style: &Style) -> String {
@@ -989,7 +915,7 @@ mod tests {
     // whole objects — is the only way `schema-tui` calls it.
     #[test]
     fn generate_value_resolves_leaf_placeholders() {
-        let defs = std::collections::BTreeMap::new();
+        let defs = BTreeMap::new();
         let val = |s: serde_json::Value| generate_value(&serde_json::from_value(s).unwrap(), &defs);
 
         assert_eq!(val(json!({ "type": "string" })), json!(""));
@@ -1007,7 +933,7 @@ mod tests {
     // `$ref`s resolve against `definitions` before producing a value.
     #[test]
     fn generate_value_resolves_refs() {
-        let mut defs = std::collections::BTreeMap::new();
+        let mut defs = BTreeMap::new();
         defs.insert("Name".to_string(), serde_json::from_value(json!({ "type": "string" })).unwrap());
 
         let schema: Schema = serde_json::from_value(json!({ "$ref": "#/definitions/Name" })).unwrap();
