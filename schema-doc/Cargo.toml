@@ -1,0 +1,9 @@
+[package]
+name = "schema-doc"
+version = "0.1.0"
+edition = "2021"
+description = "Render and scaffold JSON Schemas (schemars): agent-friendly grammar references and fill-in JSON skeletons."
+
+[dependencies]
+schemars = "0.8.22"
+serde_json = "1.0"
