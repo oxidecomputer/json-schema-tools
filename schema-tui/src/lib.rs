@@ -583,6 +583,22 @@ fn node_at_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
     Some(cur)
 }
 
+/// Mark every node along `path` — and each of its ancestors up to the root —
+/// as `included`. Without this, a deep choice (picking a variant, or
+/// including a nested field) is silently dropped from the export because
+/// some ancestor optional container was never itself included.
+fn include_path(root: &mut Node, path: &[usize]) {
+    let mut cur = root;
+    cur.included = true;
+    for &i in path {
+        let Some(next) = cur.children.get_mut(i) else {
+            return;
+        };
+        next.included = true;
+        cur = next;
+    }
+}
+
 // -----------------------------------------------------------------------------
 // App / event loop
 // -----------------------------------------------------------------------------
@@ -641,62 +657,50 @@ impl App {
         self.state.select((n > 0).then_some(n - 1));
     }
 
-    /// Mark every node along `path` — and each of its ancestors up to the root
-    /// — as `included`. Without this, a deep choice (picking a variant, or
-    /// including a nested field) is silently dropped from the export because
-    /// some ancestor optional container was never itself included.
-    fn include_path(&mut self, path: &[usize]) {
-        for end in 0..=path.len() {
-            if let Some(n) = node_at_mut(&mut self.root, &path[..end]) {
-                n.included = true;
+    /// The row under the cursor, cloned so handlers can mutate the tree.
+    fn selected_row(&self) -> Option<Row> {
+        self.rows.get(self.state.selected()?).cloned()
+    }
+
+    /// Pick a oneOf variant: update the parent's `selected_variant`, include
+    /// the parent *and* every ancestor (so the choice survives to the export
+    /// even when nested in optional containers), and expand the arm.
+    fn select_variant(&mut self, row: &Row) {
+        let Self { root, defs, .. } = self;
+        if let Some((parent_path, child_idx)) = split_path(&row.path) {
+            if let Some(parent) = node_at_mut(root, parent_path) {
+                parent.selected_variant = child_idx;
             }
+            include_path(root, parent_path);
         }
+        if let Some(node) = node_at_mut(root, &row.path) {
+            if !node.populated {
+                populate(node, defs, 0);
+            }
+            node.expanded = true;
+        }
+        self.refresh();
     }
 
     /// Enter behavior: depends on context.
     ///   - On a oneOf variant child: select this variant.
-    ///   - On any expandable: toggle expanded; if optional, also toggle included.
+    ///   - On any expandable: toggle expanded (peek without committing —
+    ///     Space is the key that includes/excludes).
     ///   - Otherwise: noop.
     fn activate(&mut self) {
-        let Some(idx) = self.state.selected() else {
+        let Some(row) = self.selected_row() else {
             return;
         };
-        let Some(row) = self.rows.get(idx).cloned() else {
-            return;
-        };
-        let defs = self.defs.clone();
-
-        // Variant selection: walk to parent and update selected_variant.
-        // Picking a variant *is* a commit — also include the parent so the
-        // choice actually shows up in the output.
         if row.is_variant_child {
-            if let Some((parent_path, child_idx)) = split_path(&row.path) {
-                if let Some(parent) = node_at_mut(&mut self.root, parent_path) {
-                    parent.selected_variant = child_idx;
-                }
-                // Include the oneOf parent *and* every ancestor, so the choice
-                // survives to the export even when nested in optional containers.
-                self.include_path(parent_path);
-            }
-            if let Some(node) = node_at_mut(&mut self.root, &row.path) {
-                if !node.populated {
-                    populate(node, &defs, 0);
-                }
-                node.expanded = true;
-            }
-            self.refresh();
-            return;
+            return self.select_variant(&row);
         }
-
         if !row.expandable {
             return;
         }
-        // Enter = toggle expansion only. Use Space to include/exclude.
-        // This lets the user peek at structure without committing the field
-        // to the output.
-        if let Some(node) = node_at_mut(&mut self.root, &row.path) {
+        let Self { root, defs, .. } = self;
+        if let Some(node) = node_at_mut(root, &row.path) {
             if !node.populated {
-                populate(node, &defs, 0);
+                populate(node, defs, 0);
             }
             node.expanded = !node.expanded;
         }
@@ -708,60 +712,37 @@ impl App {
     ///   - On an optional field: toggle include.
     ///   - On a required field: no-op (already in).
     fn toggle_include(&mut self) {
-        let Some(idx) = self.state.selected() else {
+        let Some(row) = self.selected_row() else {
             return;
         };
-        let Some(row) = self.rows.get(idx).cloned() else {
-            return;
-        };
-        let defs = self.defs.clone();
-
-        // Variant child: same effect as Enter — pick this variant and
-        // include the parent oneOf in the output.
         if row.is_variant_child {
-            if let Some((parent_path, child_idx)) = split_path(&row.path) {
-                if let Some(parent) = node_at_mut(&mut self.root, parent_path) {
-                    parent.selected_variant = child_idx;
-                }
-                self.include_path(parent_path);
-            }
-            if let Some(node) = node_at_mut(&mut self.root, &row.path) {
-                if !node.populated {
-                    populate(node, &defs, 0);
-                }
-                node.expanded = true;
-            }
-            self.refresh();
-            return;
+            return self.select_variant(&row);
         }
-
         if row.is_required {
             return;
         }
+        let Self { root, defs, .. } = self;
         let mut now_included = false;
-        if let Some(node) = node_at_mut(&mut self.root, &row.path) {
+        if let Some(node) = node_at_mut(root, &row.path) {
             node.included = !node.included;
             now_included = node.included;
-            if now_included && node.expandable && !node.populated {
-                populate(node, &defs, 0);
-            }
             if now_included && node.expandable {
+                if !node.populated {
+                    populate(node, defs, 0);
+                }
                 node.expanded = true;
             }
         }
         // Including a nested field must also pull in its ancestors, or the
         // export drops the whole subtree. Excluding leaves ancestors alone.
         if now_included {
-            self.include_path(&row.path);
+            include_path(root, &row.path);
         }
         self.refresh();
     }
 
     fn collapse_or_up(&mut self) {
-        let Some(idx) = self.state.selected() else {
-            return;
-        };
-        let Some(row) = self.rows.get(idx).cloned() else {
+        let Some(row) = self.selected_row() else {
             return;
         };
         if row.expandable && row.expanded {
