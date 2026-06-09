@@ -128,7 +128,7 @@ fn schema_from_openapi(openapi: &Value, command_path: &[String]) -> Result<(Stri
     let op_id = command_path.join("_").replace('-', "_");
     let op = find_operation(openapi, &op_id)
         .ok_or_else(|| anyhow!("no operation with operationId '{}' in spec", op_id))?;
-    let body = extract_body_schema(op, openapi)
+    let body = extract_body_schema(op, openapi)?
         .ok_or_else(|| anyhow!("operation '{}' has no JSON request body", op_id))?;
     Ok((op_id, body))
 }
@@ -151,34 +151,30 @@ fn find_operation<'a>(openapi: &'a Value, op_id: &str) -> Option<&'a Value> {
     None
 }
 
-fn extract_body_schema(op: &Value, openapi: &Value) -> Option<RootSchema> {
-    let body_schema = op
-        .get("requestBody")?
-        .get("content")?
-        .get("application/json")?
-        .get("schema")?;
+/// `Ok(None)` when the operation has no JSON request body; `Err` when it has
+/// one that doesn't parse as a JSON Schema.
+fn extract_body_schema(op: &Value, openapi: &Value) -> Result<Option<RootSchema>> {
+    let Some(body_schema) = op.pointer("/requestBody/content/application~1json/schema") else {
+        return Ok(None);
+    };
 
     let components_schemas = openapi
-        .get("components")
-        .and_then(|c| c.get("schemas"))
+        .pointer("/components/schemas")
         .cloned()
         .unwrap_or(Value::Object(Map::new()));
-
-    let body_rewritten = rewrite_refs(body_schema.clone());
-    let defs_rewritten = rewrite_refs(components_schemas);
 
     // Build a RootSchema by merging the body schema fields with a top-level
     // `definitions` map from components.schemas.
     let mut root = Map::new();
-    if let Value::Object(body_obj) = body_rewritten {
-        for (k, v) in body_obj {
-            root.insert(k, v);
-        }
+    if let Value::Object(body_obj) = rewrite_refs(body_schema.clone()) {
+        root.extend(body_obj);
     }
-    if let Value::Object(defs_obj) = defs_rewritten {
+    if let Value::Object(defs_obj) = rewrite_refs(components_schemas) {
         root.insert("definitions".to_string(), Value::Object(defs_obj));
     }
-    serde_json::from_value(Value::Object(root)).ok()
+    serde_json::from_value(Value::Object(root))
+        .context("request body did not parse as a JSON Schema")
+        .map(Some)
 }
 
 /// Recursively rewrite `$ref` values from OpenAPI 3.0's
