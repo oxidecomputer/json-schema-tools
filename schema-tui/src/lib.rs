@@ -786,10 +786,10 @@ fn run(terminal: &mut TerminalT, schema: RootSchema, title: String) -> Result<Ou
                 continue;
             }
             match (key.code, key.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                     return Ok(Outcome::Cancel);
                 }
-                (KeyCode::Char('q'), _) => {
+                (KeyCode::Char('q') | KeyCode::Esc, _) => {
                     let value = app.root.placeholder_value();
                     return Ok(Outcome::Export(value));
                 }
@@ -854,9 +854,9 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Span::raw(" include in output   "),
         Span::styled("←", Style::default().fg(Color::Yellow)),
         Span::raw(" collapse   "),
-        Span::styled("q", Style::default().fg(Color::Yellow)),
+        Span::styled("q/Esc", Style::default().fg(Color::Yellow)),
         Span::raw(" export   "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled("Ctrl-C", Style::default().fg(Color::Yellow)),
         Span::raw(" cancel"),
     ]))
     .style(Style::default().fg(Color::DarkGray));

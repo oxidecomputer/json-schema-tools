@@ -4,9 +4,9 @@
 //! dependency on how it was produced (progenitor, an OpenAPI spec, a derived
 //! `#[derive(JsonSchema)]` type, etc.):
 //!
-//! - [`render_body_schema`] — a human- and agent-friendly BNF-style grammar
+//! - [`render_body_schema`]: a human- and agent-friendly BNF-style grammar
 //!   reference for a type, with each `$ref` emitted as its own named production.
-//! - [`generate_value`] — placeholder JSON values for a schema node, so
+//! - [`generate_value`]: placeholder JSON values for a schema node, so
 //!   interactive front-ends (the `schema-tui` builder) can scaffold a body
 //!   per-field without reimplementing schema traversal.
 //!
