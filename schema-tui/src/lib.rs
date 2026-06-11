@@ -1,4 +1,4 @@
-//! schema-tui-core: an interactive accordion **builder** for JSON request
+//! schema-tui: an interactive accordion **builder** for JSON request
 //! bodies. Browse a `schemars` schema as a collapsible tree, expand the
 //! optional fields you want, pick `oneOf` variants, then quit — the body you
 //! shaped is returned as JSON. Placeholder values come from [`schema_doc`], so
@@ -8,17 +8,18 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::Terminal;
 use schema_doc::{
-    Defs, detect_tag, display_value, generate_value, instance_type, is_multi_variant, item_schema,
+    detect_tag, display_value, generate_value, instance_type, is_multi_variant, item_schema,
     non_null_variants, order_properties, ref_name, root_title, scalar_type_name, transparent_inner,
+    Defs,
 };
 use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject};
 use serde_json::{Map, Value};
@@ -34,7 +35,9 @@ use std::path::Path;
 pub fn load_schema_from_file(path: &Path) -> Result<RootSchema> {
     let content = if path.as_os_str() == "-" {
         let mut s = String::new();
-        io::stdin().read_to_string(&mut s).context("reading stdin")?;
+        io::stdin()
+            .read_to_string(&mut s)
+            .context("reading stdin")?;
         s
     } else {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
@@ -168,7 +171,7 @@ struct Node {
     included: bool,
     default: Option<Value>,
     /// Placeholder JSON for a `Leaf` node, produced by
-    /// `progenitor_client::generate_value`. A schema `default` (when present)
+    /// `schema_doc::generate_value`. A schema `default` (when present)
     /// still takes precedence in `placeholder_value`.
     leaf_value: Option<Value>,
     annotations: Vec<String>,
@@ -195,7 +198,7 @@ impl Node {
             );
         }
         // A concrete schema default (or a scalar `oneOf` variant's value) always
-        // wins; otherwise leaves use the progenitor-generated placeholder and
+        // wins; otherwise leaves use the schema_doc-generated placeholder and
         // containers are assembled from their included children.
         if let Some(d) = &self.default {
             return d.clone();
@@ -284,7 +287,8 @@ fn populate(node: &mut Node, defs: &Defs, depth: usize) {
                 //     itself a oneOf, which stays drillable as `OneOf`);
                 //   - a drillable arm hides the redundant `object` type label;
                 //   - a single-value enum arm (e.g. `"never"`) shows its value.
-                let mut child = child_node(variant_label(variant, defs), variant, true, defs, depth);
+                let mut child =
+                    child_node(variant_label(variant, defs), variant, true, defs, depth);
                 if !matches!(child.kind, NodeKind::OneOf) {
                     child.kind = NodeKind::Variant;
                 }
@@ -296,13 +300,10 @@ fn populate(node: &mut Node, defs: &Defs, depth: usize) {
             }
             node.populated = true;
             return;
-        } else if non_null.len() == 1 {
+        } else if let [Schema::Object(inner)] = non_null.as_slice() {
             // Single variant; treat as a transparent wrapper.
-            let single = non_null[0].clone();
-            if let Schema::Object(inner) = single {
-                populate_from_object(node, &inner, defs, depth);
-                return;
-            }
+            populate_from_object(node, inner, defs, depth);
+            return;
         }
     }
 
@@ -318,18 +319,14 @@ fn populate(node: &mut Node, defs: &Defs, depth: usize) {
     populate_from_object(node, &o, defs, depth);
 }
 
-fn populate_from_object(
-    node: &mut Node,
-    o: &SchemaObject,
-    defs: &Defs,
-    depth: usize,
-) {
+fn populate_from_object(node: &mut Node, o: &SchemaObject, defs: &Defs, depth: usize) {
     let Some(ov) = &o.object else {
         node.populated = true;
         return;
     };
     for (k, v, is_required) in order_properties(ov, &[]) {
-        node.children.push(child_node(k.clone(), v, is_required, defs, depth));
+        node.children
+            .push(child_node(k.clone(), v, is_required, defs, depth));
     }
     node.populated = true;
 }
@@ -366,7 +363,11 @@ fn child_node(
         populated: !expandable,
         kind,
         selected_variant: 0,
-        schema_snapshot: if expandable { Some(schema.clone()) } else { None },
+        schema_snapshot: if expandable {
+            Some(schema.clone())
+        } else {
+            None
+        },
     };
     if expandable && is_required {
         populate(&mut node, defs, depth + 1);
@@ -376,9 +377,9 @@ fn child_node(
 
 /// Decide how a property schema is presented: an expandable `OneOf`/`Object`,
 /// or a `Leaf`. For leaves we delegate the placeholder value to
-/// `progenitor_client::generate_value` (same logic that backs
-/// `--json-body-template`'s non-interactive output), so arrays, enums, and
-/// scalars all resolve identically without a parallel implementation here.
+/// `schema_doc::generate_value` (the same logic that backs the
+/// non-interactive template), so arrays, enums, and scalars all resolve
+/// identically without a parallel implementation here.
 fn classify(o: &SchemaObject, defs: &Defs) -> (NodeKind, bool, Option<Value>) {
     let leaf = |o: &SchemaObject| {
         (
@@ -486,7 +487,9 @@ fn variant_label(schema: &Schema, defs: &Defs) -> String {
         if let Some(ov) = &o.object {
             for (name, prop) in &ov.properties {
                 let Schema::Object(s) = prop else { continue };
-                let Some(values) = &s.enum_values else { continue };
+                let Some(values) = &s.enum_values else {
+                    continue;
+                };
                 if values.len() == 1 {
                     if let Value::String(v) = &values[0] {
                         return format!("\"{}\"  ({})", v, name);
@@ -523,7 +526,9 @@ fn variant_label(schema: &Schema, defs: &Defs) -> String {
 /// return that value. This is the OpenAPI shape for one branch of a
 /// `oneOf`-of-enum (e.g. `auto_restart_policy = "never" | "best_effort"`).
 fn scalar_variant_value(schema: &Schema) -> Option<Value> {
-    let Schema::Object(o) = schema else { return None };
+    let Schema::Object(o) = schema else {
+        return None;
+    };
     let values = o.enum_values.as_ref()?;
     if values.len() == 1 {
         return Some(values[0].clone());
@@ -625,8 +630,8 @@ struct App {
 
 impl App {
     fn new(schema: RootSchema, title: String) -> Self {
-        let defs = schema.definitions.clone();
         let root = build_root(&schema);
+        let defs = schema.definitions;
         let mut s = ListState::default();
         s.select(Some(0));
         let mut app = Self {
@@ -865,16 +870,26 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
 fn build_marker(row: &Row) -> (String, Style) {
     if row.is_variant_child {
-        let s = if row.is_selected_variant { "●  " } else { "○  " };
+        let s = if row.is_selected_variant {
+            "●  "
+        } else {
+            "○  "
+        };
         let style = if row.is_selected_variant {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
         return (s.to_string(), style);
     }
     let arrow = if row.expandable {
-        if row.expanded { "▼" } else { "▶" }
+        if row.expanded {
+            "▼"
+        } else {
+            "▶"
+        }
     } else {
         " "
     };
@@ -916,7 +931,9 @@ fn row_to_item(row: &Row) -> ListItem<'_> {
     };
     let label_style = if row.is_variant_child {
         if row.is_selected_variant {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().add_modifier(Modifier::DIM)
         }
@@ -969,11 +986,11 @@ mod tests {
     use super::*;
 
     // The default export (every required field, first `oneOf` variant) must
-    // match the placeholder values produced by progenitor's `generate_value`:
+    // match the placeholder values produced by `schema_doc::generate_value`:
     // empty string for strings, 0 for integers, the leading enum value for the
     // discriminator, and the first variant assembled for nested `oneOf`s.
     #[test]
-    fn template_export_uses_progenitor_values() {
+    fn template_export_uses_schema_doc_values() {
         let schema: RootSchema =
             serde_json::from_str(include_str!("../tests/fixtures/disk_create.json"))
                 .expect("parse fixture schema");

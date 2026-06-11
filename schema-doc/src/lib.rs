@@ -9,7 +9,6 @@
 //! - [`generate_value`]: placeholder JSON values for a schema node, so
 //!   interactive front-ends (the `schema-tui` builder) can scaffold a body
 //!   per-field without reimplementing schema traversal.
-//!
 
 use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,21 +22,14 @@ pub type Defs = BTreeMap<String, Schema>;
 /// Objects include only their required properties; `anyOf`/`oneOf` select the
 /// first viable variant; scalars become empty string / `0` / `false`; enums
 /// take their first value.
-///
-pub fn generate_value(
-    schema: &Schema,
-    definitions: &Defs,
-) -> serde_json::Value {
+pub fn generate_value(schema: &Schema, definitions: &Defs) -> serde_json::Value {
     match schema {
         Schema::Bool(_) => serde_json::Value::Null,
         Schema::Object(obj) => generate_value_object(obj, definitions),
     }
 }
 
-fn generate_value_object(
-    schema: &SchemaObject,
-    definitions: &Defs,
-) -> serde_json::Value {
+fn generate_value_object(schema: &SchemaObject, definitions: &Defs) -> serde_json::Value {
     if let Some(reference) = &schema.reference {
         if let Some(def_schema) = definitions.get(&ref_name(reference)) {
             return generate_value(def_schema, definitions);
@@ -130,13 +122,11 @@ pub fn render_body_schema(root_schema: &RootSchema) -> String {
     let mut out = String::new();
 
     // Brief legend so first-time readers know what the conventions mean.
-    out.push_str(&style.dim(
-        "# [foo] = optional   <Type> = named ref   | = alternative",
-    ));
+    out.push_str(&style.dim("# [foo] = optional   <Type> = named ref   | = alternative"));
     out.push('\n');
-    out.push_str(&style.dim(
-        "# (default: X) = default value   (tagged on `f`) = discriminator field",
-    ));
+    out.push_str(
+        &style.dim("# (default: X) = default value   (tagged on `f`) = discriminator field"),
+    );
     out.push_str("\n\n");
 
     out.push_str(&render_production(
@@ -313,7 +303,12 @@ fn render_variant_inline(
             for (k, v, is_required) in order_properties(ov, &priority) {
                 let (_, key) = render_key(k, is_required, style);
                 let rendered = render_schema(v, defs, refs, 0, style);
-                parts.push(format!("{} {}{}", key, rendered, default_suffix(v, " ", style)));
+                parts.push(format!(
+                    "{} {}{}",
+                    key,
+                    rendered,
+                    default_suffix(v, " ", style)
+                ));
             }
             let inline = if parts.is_empty() {
                 "{}".to_string()
@@ -466,12 +461,8 @@ fn render_object(
     format!("{{\n{}\n{}}}", lines.join("\n"), indent_outer)
 }
 
-fn build_usage_map(
-    root: &RootSchema,
-    top_name: &str,
-) -> BTreeMap<String, BTreeSet<String>> {
-    let mut map: BTreeMap<String, BTreeSet<String>> =
-        BTreeMap::new();
+fn build_usage_map(root: &RootSchema, top_name: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     walk_for_refs(&Schema::Object(root.schema.clone()), top_name, &mut map);
     for (def_name, def_schema) in &root.definitions {
         walk_for_refs(def_schema, def_name, &mut map);
@@ -479,11 +470,7 @@ fn build_usage_map(
     map
 }
 
-fn walk_for_refs(
-    schema: &Schema,
-    parent: &str,
-    map: &mut BTreeMap<String, BTreeSet<String>>,
-) {
+fn walk_for_refs(schema: &Schema, parent: &str, map: &mut BTreeMap<String, BTreeSet<String>>) {
     let Schema::Object(o) = schema else { return };
     if let Some(r) = &o.reference {
         let name = ref_name(r);
@@ -491,7 +478,10 @@ fn walk_for_refs(
         return;
     }
     if let Some(sub) = &o.subschemas {
-        for items in [&sub.one_of, &sub.any_of, &sub.all_of].into_iter().flatten() {
+        for items in [&sub.one_of, &sub.any_of, &sub.all_of]
+            .into_iter()
+            .flatten()
+        {
             for s in items {
                 walk_for_refs(s, parent, map);
             }
@@ -533,7 +523,9 @@ pub fn detect_tag(variants: &[&Schema]) -> Option<String> {
             ov.properties
                 .iter()
                 .filter_map(|(name, schema)| {
-                    let Schema::Object(s) = schema else { return None };
+                    let Schema::Object(s) = schema else {
+                        return None;
+                    };
                     let values = s.enum_values.as_ref()?;
                     if values.len() == 1 && values[0].is_string() {
                         Some(name.clone())
@@ -949,9 +941,13 @@ mod tests {
     #[test]
     fn generate_value_resolves_refs() {
         let mut defs = BTreeMap::new();
-        defs.insert("Name".to_string(), serde_json::from_value(json!({ "type": "string" })).unwrap());
+        defs.insert(
+            "Name".to_string(),
+            serde_json::from_value(json!({ "type": "string" })).unwrap(),
+        );
 
-        let schema: Schema = serde_json::from_value(json!({ "$ref": "#/definitions/Name" })).unwrap();
+        let schema: Schema =
+            serde_json::from_value(json!({ "$ref": "#/definitions/Name" })).unwrap();
         assert_eq!(generate_value(&schema, &defs), json!(""));
     }
 

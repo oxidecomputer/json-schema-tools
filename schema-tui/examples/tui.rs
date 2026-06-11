@@ -5,9 +5,9 @@
 //!     cargo run --example tui -- path/to/schema.json
 //!     cargo run --example tui -- -            # read the schema from stdin
 //!
-//! On quit (`q`) the body you shaped is printed to stdout; cancel (`Esc`)
-//! prints nothing. This is the generic counterpart to the `oxjson` binary,
-//! which sources its schema from an OpenAPI operation instead of a file.
+//! On quit (`q` or `Esc`) the body you shaped is printed to stdout; cancel
+//! (`Ctrl-C`) prints nothing. This is the generic counterpart to the `oxjson`
+//! binary, which sources its schema from an OpenAPI operation instead of a file.
 
 use std::path::Path;
 

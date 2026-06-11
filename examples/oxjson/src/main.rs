@@ -13,8 +13,8 @@
 //!     oxjson disk create --json-body-template > body.json
 //!     oxjson instance create --json-body-template > /tmp/instance.json
 
-use anyhow::{Context, Result, anyhow, bail};
-use clap::Parser;
+use anyhow::{anyhow, Context, Result};
+use clap::{ArgGroup, Parser};
 use schemars::schema::RootSchema;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
                   --json-body-schema prints the BNF-style grammar reference for the \
                   selected operation's request body (same renderer as oxide ships).\n\n\
                   --json-body-template opens an interactive TUI. Pick oneOf variants, \
-                  toggle optional fields, then 'q' to emit JSON on stdout."
+                  toggle optional fields, then 'q' to emit JSON on stdout.",
+    group = ArgGroup::new("mode").required(true)
 )]
 struct Args {
     /// OpenAPI spec file. Defaults to $OXIDE_JSON or a nearby oxide.json.
@@ -36,23 +37,20 @@ struct Args {
     spec: Option<PathBuf>,
 
     /// Print the schema grammar reference for the operation and exit.
-    #[arg(long, conflicts_with = "json_body_template")]
+    #[arg(long, group = "mode")]
     json_body_schema: bool,
 
     /// Open the interactive body-builder TUI on the operation.
-    #[arg(long)]
+    #[arg(long, group = "mode")]
     json_body_template: bool,
 
     /// CLI command path, e.g. "disk create" or "instance create".
-    #[arg(value_name = "COMMAND")]
+    #[arg(value_name = "COMMAND", required = true)]
     command: Vec<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if !args.json_body_schema && !args.json_body_template {
-        bail!("specify one of --json-body-schema or --json-body-template");
-    }
 
     let spec_path = match args.spec {
         Some(p) => p,
@@ -66,9 +64,6 @@ fn main() -> Result<()> {
     let openapi = load_openapi(&spec_path)
         .with_context(|| format!("loading OpenAPI spec at {}", spec_path.display()))?;
 
-    if args.command.is_empty() {
-        bail!("a COMMAND path is required (e.g. `oxjson disk create --json-body-template`)");
-    }
     let (op_id, schema) = schema_from_openapi(&openapi, &args.command)?;
 
     if args.json_body_schema {
@@ -86,7 +81,7 @@ fn main() -> Result<()> {
 
 // ---------------------------------------------------------------------------
 // OpenAPI → schemars glue. This is oxjson-specific (pulling a request-body
-// schema out of an OpenAPI 3.0 operation); the TUI itself (`schema_tui_core`)
+// schema out of an OpenAPI 3.0 operation); the TUI itself (`schema-tui`)
 // is schema-generic and knows nothing about OpenAPI.
 // ---------------------------------------------------------------------------
 
