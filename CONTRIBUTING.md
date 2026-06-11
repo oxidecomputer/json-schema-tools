@@ -35,4 +35,3 @@ JSON Schema construct, not the specific type.
 - Generic schema traversal helpers live in `schema-doc` and are shared by both
   crates; extend those rather than duplicating traversal logic
 - Keep READMEs and doc comments brief and factual
-- Keep commit messages to a short subject line
