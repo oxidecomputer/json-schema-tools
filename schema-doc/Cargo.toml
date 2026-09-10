@@ -2,6 +2,7 @@
 name = "schema-doc"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 description = "Render and scaffold JSON Schemas (schemars): agent-friendly grammar references and fill-in JSON skeletons."
 
 [dependencies]

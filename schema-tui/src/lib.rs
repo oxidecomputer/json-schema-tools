@@ -1,3 +1,9 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+// Copyright 2026 Oxide Computer Company
+
 //! schema-tui: an interactive accordion **builder** for JSON request
 //! bodies. Browse a `schemars` schema as a collapsible tree, expand the
 //! optional fields you want, pick `oneOf` variants, then quit — the body you

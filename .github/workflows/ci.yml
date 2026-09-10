@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- --deny warnings
+      - name: Test
+        run: cargo test --workspace
+
+  build-oxjson:
+    name: build oxjson
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build oxjson
+        run: cargo build --release --locked -p oxjson
+      - name: Smoke test
+        run: ./target/release/oxjson --help
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxjson-${{ github.sha }}
+          path: target/release/oxjson
