@@ -2,6 +2,7 @@
 name = "oxjson"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 description = "Standalone demo: schema reference + interactive JSON-body builder over an OpenAPI spec."
 
 [dependencies]
